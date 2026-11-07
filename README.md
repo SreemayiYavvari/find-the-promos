@@ -16,7 +16,10 @@ You can use it two ways, both on the same backend:
 ### Web app
 
 ```bash
-pip install -r requirements.txt
+python3 -m venv venv
+source venv/bin/activate
+python -m pip install --upgrade pip
+ppython -m pip install -r requirements.txt
 cp .env.example .env            # add GEMINI_API_KEY (or paste it in the app sidebar)
 streamlit run app.py
 ```
