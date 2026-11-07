@@ -122,17 +122,21 @@ def analyze(files, settings, api_key):
         if total == 0:
             raise ValueError("No valid 20–60 s clip windows were found in these files.")
         evaluator = make_evaluator(api_key, settings["model"], settings["request_interval"])
-        selected, done = [], 0
+        selected, done, skipped = [], 0, []
         for item in prepared:
             for index, cand in enumerate(item["chosen"], 1):
                 bar.progress(done / total, text=f"{item['episode']}: evaluating {index}/{len(item['chosen'])} "
                                                 f"with {evaluator.model} ({done}/{total} done)")
                 try:
                     cand.evaluation = evaluator.evaluate(cand)
-                except (ValueError, RuntimeError, KeyError, TypeError) as exc:
+                except (ValueError, KeyError, TypeError) as exc:
+                    # Bad model output after retries: skip this one clip, keep the run alive.
+                    skipped.append(f"{cand.candidate_id}: {exc}")
+                except RuntimeError as exc:  # HTTP/auth/quota/network: stop, like the CLI
                     raise RuntimeError(f"{cand.candidate_id}: {exc}") from None
                 done += 1
-            picks = suppress(item["chosen"], settings["iou_threshold"], settings["promos_per_episode"])
+            evaluated = [c for c in item["chosen"] if c.evaluation]
+            picks = suppress(evaluated, settings["iou_threshold"], settings["promos_per_episode"])
             selected.extend((c, item["name"]) for c in picks)
             log.caption(f"Last finished: {item['episode']} — {item['valid']} valid windows, {len(picks)} promos kept")
         bar.progress(1.0, text=f"Evaluated {total}/{total} candidates")
@@ -141,9 +145,9 @@ def analyze(files, settings, api_key):
         promos = [serialize(c, src, rank) for rank, (c, src) in enumerate(selected, 1)]
         stats = {"episodes": len(prepared), "valid_windows": valid, "evaluated": total,
                  "api_attempts": evaluator.calls, "seconds": round(time.perf_counter() - started, 1),
-                 "tokens": dict(evaluator.usage), "model": evaluator.model}
+                 "tokens": dict(evaluator.usage), "model": evaluator.model, "skipped_candidates": len(skipped)}
         status.update(label=f"Done — {len(promos)} ranked promos", state="complete", expanded=False)
-    return promos, warnings, stats
+    return promos, warnings + [f"SKIPPED (invalid Gemini output) {m}" for m in skipped], stats
 
 
 def report_html(promos) -> bytes:
@@ -258,10 +262,13 @@ if result:
     d1.download_button("⬇ All promos (JSON)", dumps(promos), "promos.json", "application/json", use_container_width=True)
     d2.download_button("⬇ Standalone report (HTML)", report_html(promos), "report.html", "text/html", use_container_width=True)
     if result["warnings"]:
-        with st.expander(f"Parser warnings ({len(result['warnings'])})"):
+        with st.expander(f"Warnings and skipped clips ({len(result['warnings'])})"):
             st.code("\n".join(result["warnings"]))
     with st.expander("Run details"):
         st.json(stats)
+    if stats.get("skipped_candidates"):
+        st.warning(f"{stats['skipped_candidates']} candidate clip(s) were skipped because Gemini kept returning "
+                   "quotes that could not be matched to the script. Details are under Warnings.")
     if not promos:
         st.warning("No standalone promos met the selection rules. Try raising max candidates or the shortlist fraction.")
     for promo in promos:
