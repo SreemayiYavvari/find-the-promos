@@ -21,6 +21,7 @@ source venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 cp .env.example .env            # add GEMINI_API_KEY (or paste it in the app sidebar)
+nano .env
 streamlit run app.py
 ```
 
