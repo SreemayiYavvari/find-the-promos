@@ -30,19 +30,42 @@ Never create timestamps. Set standalone false for clips requiring missing contex
 one-sentence justification explaining what remains unresolved and why viewers might continue."""
 
 
+def _norm(text):
+    """Compare quotes ignoring surrounding quote marks, whitespace and case."""
+    text = re.sub(r"\s+", " ", str(text)).strip().strip('"\u201c\u201d\'').strip()
+    return text.casefold()
+
+
+def _ground(result, candidate, key):
+    """Return (entry_id, exact_source_text) for the hook/cliffhanger, or raise.
+
+    Models often drop the quotation marks, tweak whitespace, quote only part of a line,
+    or pick a neighbouring entry id. Any such near-miss is snapped to the real source
+    entry, so the stored quote is always exact source text; anything else is rejected.
+    """
+    edge = candidate.edge(key == "hook")
+    entry_id, quote = result[f"{key}_entry_id"], result[f"{key}_quote"]
+    if type(entry_id) is not int or not isinstance(quote, str) or not quote.strip():
+        raise ValueError(f"Invalid {key} entry ID or quote")
+    wanted = _norm(quote)
+    by_id = next((e for e in edge if e.entry_id == entry_id), None)
+    if by_id and (quote == by_id.content or wanted == _norm(by_id.content)
+                  or (len(wanted) >= 8 and wanted in _norm(by_id.content))):
+        return by_id.entry_id, by_id.content
+    for e in edge:  # wrong id but the quote is a real line inside the allowed window
+        if wanted == _norm(e.content) or (len(wanted) >= 8 and wanted in _norm(e.content)):
+            return e.entry_id, e.content
+    raise ValueError(f"Ungrounded {key} quote or entry ID")
+
+
 def validate(result, candidate):
     if not isinstance(result, dict):
         raise ValueError("Evaluator response must be a JSON object")
     if set(result) != set(SCHEMA["required"]):
         raise ValueError("Evaluator returned missing or extra fields")
+    result = dict(result)
     for key in ("hook", "cliffhanger"):
-        entry_id = result[f"{key}_entry_id"]
-        if type(entry_id) is not int:
-            raise ValueError("Entry IDs must be integers")
-        edge = candidate.edge(key == "hook")
-        entry = next((e for e in edge if e.entry_id == entry_id), None)
-        if not entry or result[f"{key}_quote"] != entry.content:
-            raise ValueError(f"Ungrounded {key} quote or entry ID")
+        result[f"{key}_entry_id"], result[f"{key}_quote"] = _ground(result, candidate, key)
     score = result["viral_score"]
     if type(score) not in (int, float) or not math.isfinite(score) or not 0 <= score <= 100:
         raise ValueError("viral_score must be finite and in [0,100]")
@@ -131,6 +154,11 @@ class GeminiEvaluator:
                     retry_delay = min(60, max(retry_delay, float(exc.headers.get("Retry-After", 0))))
                 except (TypeError, ValueError, AttributeError):
                     pass
+            except ValueError:
+                # Malformed or ungrounded model output: sampling is random, so retry.
+                if attempt == 2:
+                    raise
+                retry_delay = 1
             except (URLError, TimeoutError):
                 if attempt == 2:
                     raise RuntimeError("Gemini request failed after three attempts; check your connection") from None
